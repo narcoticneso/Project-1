@@ -70,6 +70,8 @@ private:
   double aaThresh;
   int samples;
 
+  std::vector<std::thread> workerThreads; // Stores worker threads
+  std::vector<bool> threadStatus; // Tracks the status of each worker thread
 };
 
 #endif // __RAYTRACER_H__

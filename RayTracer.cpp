@@ -21,6 +21,8 @@
 
 #include <fstream>
 #include <iostream>
+#include <thread>
+#include <vector>
 
 using namespace std;
 extern TraceUI *traceUI;
@@ -81,33 +83,67 @@ glm::dvec3 RayTracer::traceRay(ray &r, const glm::dvec3 &thresh, int depth,
 #endif
 
   if (scene->intersect(r, i)) {
-    // YOUR CODE HERE
-
-    // An intersection occurred!  We've got work to do. For now, this code gets
-    // the material for the surface that was intersected, and asks that material
-    // to provide a color for the ray.
-
-    // This is a great place to insert code for recursive ray tracing. Instead
-    // of just returning the result of shade(), add some more steps: add in the
-    // contributions from reflected and refracted rays.
-
+    // Get the material for the surface
     const Material &m = i.getMaterial();
+    
+    // Get intersection point Q and normal N
+    glm::dvec3 Q = r.at(i);
+    glm::dvec3 N = i.getN();
+    glm::dvec3 d = r.getDirection();
+    
+    // Base shading (diffuse + specular + shadows)
     colorC = m.shade(scene.get(), r, i);
+    
+    // Recursion depth check
+    if (depth > 0) {
+      // Reflection
+      if (m.kr(i).length() > 0.0) {
+        glm::dvec3 R = glm::reflect(d, N);
+        ray reflectRay(Q, R, glm::dvec3(1.0, 1.0, 1.0), ray::VISIBILITY);
+        double tReflect;
+        glm::dvec3 reflectColor = traceRay(reflectRay, thresh, depth - 1, tReflect);
+        colorC += m.kr(i) * reflectColor;
+      }
+      
+      // Refraction
+      if (m.kt(i).length() > 0.0) {
+        // Determine refractive indices
+        double n_i, n_t;
+        
+        // Check if ray is entering or exiting the object
+        double cosIncident = glm::dot(d, N);
+        
+        if (cosIncident > 0.0) {  // Ray is exiting object
+          n_i = m.index(i);
+          n_t = 1.0;  // Index of air
+        } else {  // Ray is entering object
+          n_i = 1.0;  // Index of air
+          n_t = m.index(i);
+        }
+        
+        // Check for total internal reflection
+        double cosThetaI = -glm::dot(d, N);
+        double sinThetaT2 = (n_i / n_t) * (n_i / n_t) * (1.0 - cosThetaI * cosThetaI);
+        
+        if (sinThetaT2 < 1.0) {  // No total internal reflection
+          double cosThetaT = glm::sqrt(1.0 - sinThetaT2);
+          glm::dvec3 T = (n_i / n_t) * (-d) + 
+                         ((n_i / n_t) * cosThetaI - cosThetaT) * N;
+          T = glm::normalize(T);
+          
+          ray refractRay(Q, T, glm::dvec3(1.0, 1.0, 1.0), ray::VISIBILITY);
+          double tRefract;
+          glm::dvec3 refractColor = traceRay(refractRay, thresh, depth - 1, tRefract);
+          colorC += m.kt(i) * refractColor;
+        }
+      }
+    }
   } else {
-    // No intersection. This ray travels to infinity, so we color
-    // it according to the background color, which in this (simple)
-    // case is just black.
-    //
-    // FIXME: Add CubeMap support here.
-    // TIPS: CubeMap object can be fetched from
-    // traceUI->getCubeMap();
-    //       Check traceUI->cubeMap() to see if cubeMap is loaded
-    //       and enabled.
-
+    // No intersection - return background color
     colorC = glm::dvec3(0.0, 0.0, 0.0);
   }
 #if VERBOSE
-  std::cerr << "== depth: " << depth + 1 << " done, returning: " << colorC
+  std::cerr << "== depth: " << depth << " done, returning: " << colorC
             << std::endl;
 #endif
   return colorC;
@@ -226,7 +262,7 @@ void RayTracer::traceSetup(int w, int h) {
  * RayTracer::traceImage
  *
  *	Trace the image and store the pixel data in RayTracer::buffer.
- *
+ *  
  *	Arguments:
  *		w:	width of the image buffer
  *		h:	height of the image buffer
@@ -236,14 +272,55 @@ void RayTracer::traceImage(int w, int h) {
   // Always call traceSetup before rendering anything.
   traceSetup(w, h);
 
-  // YOUR CODE HERE
-  // FIXME: Start one or more threads for ray tracing
-  //
-  // TIPS: Ideally, the traceImage should be executed asynchronously,
-  //       i.e. returns IMMEDIATELY after working threads are launched.
-  //
-  //       An asynchronous traceImage lets the GUI update your results
-  //       while rendering.
+  // Get the number of threads to use
+  int numThreads = traceUI->getThreads();
+
+  // Resize and initialize the threadStatus array
+  threadStatus.resize(numThreads);
+  for (int t = 0; t < numThreads; t++) {
+    threadStatus[t] = false; // Mark all threads as not finished
+  }
+
+  // Lambda function for rendering a portion of the image
+  auto renderChunk = [this](int startCol, int endCol, int startRow, int endRow, int threadIndex) {
+    for (int j = startRow; j < endRow; j++) {
+      for (int i = startCol; i < endCol; i++) {
+        // Convert pixel (i, j) to normalized window coordinates (NDC)
+        double x = double(i) / double(buffer_width);
+        double y = double(j) / double(buffer_height);
+
+        // Construct the ray explicitly
+        ray r(glm::dvec3(0, 0, 0), glm::dvec3(0, 0, 0), glm::dvec3(1.0, 1.0, 1.0), ray::VISIBILITY);
+
+        // Use rayThrough to calculate the ray's origin and direction
+        scene->getCamera().rayThrough(x, y, r);
+
+        // Trace the ray and get the color
+        double t;
+        glm::dvec3 color = traceRay(r, glm::dvec3(1.0, 1.0, 1.0), traceUI->getDepth(), t);
+
+        // Set the pixel color in the buffer
+        setPixel(i, j, color);
+      }
+    }
+
+    // Mark this thread as finished
+    threadStatus[threadIndex] = true;
+  };
+
+  // Clear any existing worker threads
+  workerThreads.clear();
+
+  // Divide the image into vertical strips (each thread renders a different section horizontally)
+  int colsPerThread = w / numThreads;
+  for (int t = 0; t < numThreads; t++) {
+    int startCol = t * colsPerThread;
+    int endCol = (t == numThreads - 1) ? w : startCol + colsPerThread;
+    int startRow = 0;
+    int endRow = h;
+    
+    workerThreads.emplace_back(renderChunk, startCol, endCol, startRow, endRow, t);
+  }
 }
 
 int RayTracer::aaImage() {
@@ -252,7 +329,44 @@ int RayTracer::aaImage() {
   //
   // TIP: samples and aaThresh have been synchronized with TraceUI by
   //      RayTracer::traceSetup() function
-  return 0;
+  
+  if (!sceneLoaded()) {
+    return 0; // No scene loaded, nothing to do
+  }
+
+  // Number of supersamples per pixel (e.g., 4 for 2x2 sampling)
+  int numSamples = samples; // `samples` is synchronized with TraceUI
+
+  // Iterate over each pixel in the image
+  for (int j = 0; j < buffer_height; j++) {
+    for (int i = 0; i < buffer_width; i++) {
+      glm::dvec3 color(0, 0, 0);
+
+      // Supersampling: Take multiple samples within the pixel
+      for (int sy = 0; sy < numSamples; sy++) {
+        for (int sx = 0; sx < numSamples; sx++) {
+          // Calculate the subpixel offset
+          double xOffset = (sx + 0.5) / numSamples;
+          double yOffset = (sy + 0.5) / numSamples;
+
+          // Convert pixel (i, j) to normalized device coordinates (NDC)
+          double x = (i + xOffset) / buffer_width;
+          double y = (j + yOffset) / buffer_height;
+
+          // Trace the ray for this subpixel
+          color += trace(x, y);
+        }
+      }
+
+      // Average the color over all samples
+      color /= (numSamples * numSamples);
+
+      // Set the averaged color to the pixel
+      setPixel(i, j, color);
+    }
+  }
+
+  return 1; // Return 1 if success
 }
 
 bool RayTracer::checkRender() {
@@ -262,7 +376,14 @@ bool RayTracer::checkRender() {
   //
   // TIPS: Introduce an array to track the status of each worker thread.
   //       This array is maintained by the worker threads.
-  return true;
+  
+  // Check if all threads have finished
+  for (const auto &status : threadStatus) {
+    if (!status) {
+      return false; // At least one thread is still running
+    }
+  }
+  return true; // All threads are done
 }
 
 void RayTracer::waitRender() {
@@ -272,6 +393,16 @@ void RayTracer::waitRender() {
   //        traceImage implementation.
   //
   // TIPS: Join all worker threads here.
+  
+  // Join all worker threads
+  for (auto &t : workerThreads) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+
+  // Clear the workerThreads vector after joining
+  workerThreads.clear();
 }
 
 
