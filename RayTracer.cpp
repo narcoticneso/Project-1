@@ -116,6 +116,7 @@ glm::dvec3 RayTracer::traceRay(ray &r, const glm::dvec3 &thresh, int depth,
         if (cosIncident > 0.0) {  // Ray is exiting object
           n_i = m.index(i);
           n_t = 1.0;  // Index of air
+          N = -N; // Flip normal to face the ray direction
         } else {  // Ray is entering object
           n_i = 1.0;  // Index of air
           n_t = m.index(i);
@@ -141,6 +142,12 @@ glm::dvec3 RayTracer::traceRay(ray &r, const glm::dvec3 &thresh, int depth,
   } else {
     // No intersection - return background color
     colorC = glm::dvec3(0.0, 0.0, 0.0);
+
+    // added: check to see if cubemap is loaded, then get color
+    if(traceUI->cubeMap()){
+      CubeMap *cm = traceUI->getCubeMap();
+      colorC = cm->getColor(r);
+    }
   }
 #if VERBOSE
   std::cerr << "== depth: " << depth << " done, returning: " << colorC

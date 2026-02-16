@@ -45,7 +45,8 @@ double PointLight::distanceAttenuation(const glm::dvec3 &P) const {
   
   // Inverse square law attenuation: 1 / (distance^2)
   // Add small epsilon to avoid division by zero
-  return 1.0 / (distance * distance + 1e-6);
+  double denom = constantTerm + linearTerm * distance + quadraticTerm * distance * distance;
+  return min(1.0, 1.0 / denom);
 }
 
 glm::dvec3 PointLight::getColor() const { return color; }
